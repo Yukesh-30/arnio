@@ -12,7 +12,7 @@ A technical reference guide to the public classes and functions within the **Arn
 | **Conversion**        | [`from_pandas`](#from_pandas) • [`to_pandas`](#to_pandas)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | **Integration**       | [`ArnioPandasAccessor`](#arniopandasaccessor)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | **Pipeline**          | [`pipeline`](#pipeline) • [`register_step`](#register_step)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| **Data Quality**      | [`profile`](#profile) • [`suggest_cleaning`](#suggest_cleaning) • [`auto_clean`](#auto_clean) • [`DataQualityReport`](#dataqualityreport) • [`ColumnProfile`](#columnprofile)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **Data Quality**      | [`profile`](#profile) • [`suggest_cleaning`](#suggest_cleaning) • [`auto_clean`](#auto_clean) • [`check_quality_gates`](#check_quality_gates) • [`DataQualityReport`](#dataqualityreport) • [`ColumnProfile`](#columnprofile)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | **Schema Validation** | [`Schema`](#schema) • [`Field`](#field) • [`validate`](#validate) • [`ValidationResult`](#validationresult) • [`ValidationIssue`](#validationissue) • [`Int64`](#int64) • [`Float64`](#float64) • [`String`](#string) • [`Bool`](#bool) • [`Email`](#email) • [`URL`](#url) • [`CountryCode`](#countrycode) • [`DateTime`](#datetime)                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Custom Exceptions** | [`ArnioError`](#arnioerror) • [`CsvReadError`](#csvreaderror) • [`TypeCastError`](#typecasterror) • [`UnknownStepError`](#unknownsteperror)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
@@ -342,6 +342,26 @@ Examine a report or frame and get a list of recommended cleaning steps.
 ### auto_clean
 
 Profile the data and immediately apply repairs.
+
+### check_quality_gates
+
+Compare two `DataQualityReport` objects and return a pass/fail
+`QualityGateResult` for CI or monitoring workflows.
+
+```python
+baseline = ar.profile(ar.read_csv("baseline.csv"))
+current = ar.profile(ar.read_csv("current.csv"))
+
+result = ar.check_quality_gates(
+    baseline,
+    current,
+    max_row_count_delta_ratio=0.10,
+    max_null_ratio_delta=0.05,
+)
+
+print(result.passed)
+print(result.to_markdown())
+```
 
 ### DataQualityReport
 

@@ -1016,6 +1016,23 @@ print(comparison.drift_report["score"]["status"])  # "ok", "warning", or "change
 print(comparison.status_counts)  # {"ok": 2, "warning": 1, "changed": 0}
 ```
 
+Use `ar.check_quality_gates()` when profile drift should become a pass/fail
+decision for CI, data releases, or monitoring.
+
+```python
+result = ar.check_quality_gates(
+    baseline,
+    current,
+    max_row_count_delta_ratio=0.10,
+    max_null_ratio_delta=0.05,
+    max_numeric_mean_delta_ratio=0.10,
+)
+
+if not result.passed:
+    print(result.to_markdown())
+    result.raise_for_failures()
+```
+
 > **Scoring Contract:** The `quality_score` starts at 100.0 and subtracts capped penalties for duplicates, nulls, and suggested dtype mismatches. The `score_components` field exposes these penalties as negative values. (Note: Semantic-validity penalties are intentionally out of scope for the current implementation.)
 
 ### 1. Terminal Representation (Simplified Example)

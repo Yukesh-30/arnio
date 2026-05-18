@@ -126,6 +126,119 @@ def test_compare_profiles_handles_single_column_profiles():
     assert comparison.status_counts == {"ok": 1, "warning": 0, "changed": 0}
 
 
+def test_check_quality_gates_passes_identical_profiles():
+    frame = ar.from_pandas(
+        pd.DataFrame({"score": [10.0, 11.0, 12.0], "city": ["a", "b", "a"]})
+    )
+
+    result = ar.check_quality_gates(ar.profile(frame), ar.profile(frame))
+
+    assert result.passed is True
+    assert result.issues == []
+    assert result.summary()["passed"] is True
+    assert result.to_dict()["passed"] is True
+    assert result.to_dict()["summary"]["issue_count"] == 0
+    assert "All configured quality gates passed" in result.to_markdown()
+
+
+def test_check_quality_gates_detects_row_duplicate_null_and_numeric_drift():
+    baseline = ar.profile(
+        ar.from_pandas(
+            pd.DataFrame({"score": [10.0, 10.0, 10.0], "city": ["a", "b", "c"]})
+        )
+    )
+    current = ar.profile(
+        ar.from_pandas(
+            pd.DataFrame(
+                {
+                    "score": [20.0, 20.0, None, None, 20.0],
+                    "city": ["a", "a", "a", "a", "a"],
+                }
+            )
+        )
+    )
+
+    result = ar.check_quality_gates(
+        baseline,
+        current,
+        max_row_count_delta_ratio=0.2,
+        max_duplicate_ratio_delta=0.1,
+        max_null_ratio_delta=0.1,
+        max_numeric_mean_delta_ratio=0.5,
+    )
+
+    metrics = {issue.metric for issue in result.issues}
+    assert result.passed is False
+    assert {"row_count", "duplicate_ratio", "null_ratio", "numeric_mean"} <= metrics
+    assert any(issue.column == "score" for issue in result.issues)
+
+
+def test_check_quality_gates_detects_schema_and_dtype_changes():
+    baseline = ar.profile(
+        ar.from_pandas(pd.DataFrame({"score": [1, 2], "city": ["a", "b"]}))
+    )
+    current = ar.profile(
+        ar.from_pandas(pd.DataFrame({"score": ["1", "2"], "state": ["a", "b"]}))
+    )
+
+    result = ar.check_quality_gates(baseline, current)
+
+    issues = {(issue.metric, issue.column) for issue in result.issues}
+    assert ("missing_column", "city") in issues
+    assert ("new_column", "state") in issues
+    assert ("dtype", "score") in issues
+
+
+def test_check_quality_gates_can_allow_schema_changes_and_disable_thresholds():
+    baseline = ar.profile(ar.from_pandas(pd.DataFrame({"score": [1.0, 2.0]})))
+    current = ar.profile(
+        ar.from_pandas(pd.DataFrame({"score": [100.0, 200.0], "extra": ["x", "y"]}))
+    )
+
+    result = ar.check_quality_gates(
+        baseline,
+        current,
+        allow_new_columns=True,
+        max_numeric_mean_delta_ratio=None,
+        max_numeric_std_delta_ratio=None,
+    )
+
+    assert result.passed is True
+
+
+def test_check_quality_gates_markdown_escapes_table_cells():
+    baseline = ar.profile(ar.from_pandas(pd.DataFrame({"bad|name": [1, 2]})))
+    current = ar.profile(ar.from_pandas(pd.DataFrame({"other": [1, 2]})))
+
+    markdown = ar.check_quality_gates(baseline, current).to_markdown()
+
+    assert "bad\\|name" in markdown
+
+
+def test_check_quality_gates_validates_thresholds_and_flags():
+    report = ar.profile(ar.from_pandas(pd.DataFrame({"score": [1.0, 2.0]})))
+
+    with pytest.raises(ValueError, match="finite non-negative"):
+        ar.check_quality_gates(report, report, max_null_ratio_delta=-0.1)
+
+    with pytest.raises(TypeError, match="allow_new_columns must be a bool"):
+        ar.check_quality_gates(report, report, allow_new_columns="yes")
+
+
+def test_quality_gate_result_raise_for_failures():
+    baseline = ar.profile(ar.from_pandas(pd.DataFrame({"score": [1.0, 2.0]})))
+    current = ar.profile(ar.from_pandas(pd.DataFrame({"score": [100.0, 200.0]})))
+
+    result = ar.check_quality_gates(
+        baseline,
+        current,
+        max_numeric_mean_delta_ratio=0.1,
+    )
+
+    with pytest.raises(ValueError, match="data quality gate"):
+        result.raise_for_failures()
+
+
 def test_suggest_cleaning_returns_pipeline_compatible_steps(csv_with_duplicates):
     frame = ar.read_csv(csv_with_duplicates)
     suggestions = ar.suggest_cleaning(frame)

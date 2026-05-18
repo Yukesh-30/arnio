@@ -6,6 +6,7 @@ Data quality profiling and safe automatic cleaning helpers.
 from __future__ import annotations
 
 import html
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -437,6 +438,113 @@ class ProfileComparison:
         }
 
 
+@dataclass(frozen=True)
+class QualityGateIssue:
+    """One failed data-quality gate."""
+
+    metric: str
+    message: str
+    column: str | None = None
+    baseline: Any = None
+    current: Any = None
+    threshold: Any = None
+    delta: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly dictionary representation."""
+        return {
+            "metric": self.metric,
+            "column": self.column,
+            "baseline": _clean_scalar(self.baseline),
+            "current": _clean_scalar(self.current),
+            "threshold": _clean_scalar(self.threshold),
+            "delta": _clean_scalar(self.delta),
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
+class QualityGateResult:
+    """Pass/fail result from threshold-based profile quality gates."""
+
+    baseline_profile: DataQualityReport
+    current_profile: DataQualityReport
+    issues: list[QualityGateIssue]
+    thresholds: dict[str, Any]
+
+    @property
+    def passed(self) -> bool:
+        """Whether all configured quality gates passed."""
+        return len(self.issues) == 0
+
+    def summary(self) -> dict[str, Any]:
+        """Return a compact summary suitable for logs and CI output."""
+        return {
+            "passed": self.passed,
+            "issue_count": len(self.issues),
+            "row_count": {
+                "baseline": self.baseline_profile.row_count,
+                "current": self.current_profile.row_count,
+            },
+            "column_count": {
+                "baseline": self.baseline_profile.column_count,
+                "current": self.current_profile.column_count,
+            },
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly dictionary representation."""
+        return {
+            "passed": self.passed,
+            "summary": self.summary(),
+            "thresholds": {
+                name: _clean_scalar(value) for name, value in self.thresholds.items()
+            },
+            "issues": [issue.to_dict() for issue in self.issues],
+        }
+
+    def to_markdown(self) -> str:
+        """Return a GitHub-friendly quality-gate report."""
+        lines = ["# Data Quality Gates", ""]
+        lines.append(f"- Status: {'passed' if self.passed else 'failed'}")
+        lines.append(f"- Issues: {len(self.issues)}")
+        lines.append(f"- Baseline rows: {self.baseline_profile.row_count}")
+        lines.append(f"- Current rows: {self.current_profile.row_count}")
+        lines.append("")
+
+        if not self.issues:
+            lines.append("All configured quality gates passed.")
+            return "\n".join(lines)
+
+        lines.append(
+            "| Metric | Column | Baseline | Current | Delta | Threshold | Message |"
+        )
+        lines.append("|---|---|---|---|---|---|---|")
+
+        for issue in self.issues:
+            lines.append(
+                "| "
+                f"{_markdown_cell(issue.metric)} | "
+                f"{_markdown_cell(issue.column)} | "
+                f"{_markdown_cell(issue.baseline)} | "
+                f"{_markdown_cell(issue.current)} | "
+                f"{_markdown_cell(issue.delta)} | "
+                f"{_markdown_cell(issue.threshold)} | "
+                f"{_markdown_cell(issue.message)} |"
+            )
+
+        return "\n".join(lines)
+
+    def raise_for_failures(self) -> None:
+        """Raise ``ValueError`` if any configured quality gate failed."""
+        if self.passed:
+            return
+        raise ValueError(
+            f"{len(self.issues)} data quality gate(s) failed. "
+            "Inspect result.issues or result.to_markdown() for details."
+        )
+
+
 def profile(frame: ArFrame, *, sample_size: int = 5) -> DataQualityReport:
     """Profile data quality for an ArFrame.
 
@@ -575,6 +683,196 @@ def compare_profiles(
     )
 
 
+def check_quality_gates(
+    baseline_profile: DataQualityReport,
+    current_profile: DataQualityReport,
+    *,
+    max_row_count_delta_ratio: float | None = 0.1,
+    max_duplicate_ratio_delta: float | None = 0.05,
+    max_null_ratio_delta: float | None = 0.05,
+    max_numeric_mean_delta_ratio: float | None = 0.1,
+    max_numeric_std_delta_ratio: float | None = 0.2,
+    allow_new_columns: bool = False,
+    allow_missing_columns: bool = False,
+    fail_on_dtype_change: bool = True,
+) -> QualityGateResult:
+    """Check two quality profiles against pass/fail drift thresholds.
+
+    Parameters
+    ----------
+    baseline_profile, current_profile : DataQualityReport
+        Profiles produced by :func:`profile`.
+    max_row_count_delta_ratio : float or None, default 0.1
+        Maximum relative row-count drift. ``None`` disables this gate.
+    max_duplicate_ratio_delta : float or None, default 0.05
+        Maximum absolute duplicate-ratio drift. ``None`` disables this gate.
+    max_null_ratio_delta : float or None, default 0.05
+        Maximum absolute per-column null-ratio drift. ``None`` disables this gate.
+    max_numeric_mean_delta_ratio : float or None, default 0.1
+        Maximum relative per-column numeric mean drift. ``None`` disables this gate.
+    max_numeric_std_delta_ratio : float or None, default 0.2
+        Maximum relative per-column numeric standard-deviation drift.
+        ``None`` disables this gate.
+    allow_new_columns, allow_missing_columns : bool, default False
+        Whether added or removed columns are allowed.
+    fail_on_dtype_change : bool, default True
+        Whether shared columns with changed dtypes fail the gate.
+
+    Returns
+    -------
+    QualityGateResult
+        Structured pass/fail output with issue details and Markdown rendering.
+
+    Examples
+    --------
+    >>> baseline = ar.profile(ar.read_csv("baseline.csv"))
+    >>> current = ar.profile(ar.read_csv("current.csv"))
+    >>> result = ar.check_quality_gates(baseline, current)
+    >>> result.passed
+    True
+    """
+    if not isinstance(baseline_profile, DataQualityReport) or not isinstance(
+        current_profile, DataQualityReport
+    ):
+        raise TypeError("check_quality_gates expects two DataQualityReport instances")
+
+    thresholds = {
+        "max_row_count_delta_ratio": _validate_gate_threshold(
+            max_row_count_delta_ratio, "max_row_count_delta_ratio"
+        ),
+        "max_duplicate_ratio_delta": _validate_gate_threshold(
+            max_duplicate_ratio_delta, "max_duplicate_ratio_delta"
+        ),
+        "max_null_ratio_delta": _validate_gate_threshold(
+            max_null_ratio_delta, "max_null_ratio_delta"
+        ),
+        "max_numeric_mean_delta_ratio": _validate_gate_threshold(
+            max_numeric_mean_delta_ratio, "max_numeric_mean_delta_ratio"
+        ),
+        "max_numeric_std_delta_ratio": _validate_gate_threshold(
+            max_numeric_std_delta_ratio, "max_numeric_std_delta_ratio"
+        ),
+        "allow_new_columns": _validate_gate_bool(
+            allow_new_columns, "allow_new_columns"
+        ),
+        "allow_missing_columns": _validate_gate_bool(
+            allow_missing_columns, "allow_missing_columns"
+        ),
+        "fail_on_dtype_change": _validate_gate_bool(
+            fail_on_dtype_change, "fail_on_dtype_change"
+        ),
+    }
+
+    issues: list[QualityGateIssue] = []
+
+    _add_ratio_issue(
+        issues,
+        metric="row_count",
+        baseline=baseline_profile.row_count,
+        current=current_profile.row_count,
+        threshold=thresholds["max_row_count_delta_ratio"],
+        message="row count drift exceeded threshold",
+    )
+    _add_absolute_issue(
+        issues,
+        metric="duplicate_ratio",
+        baseline=baseline_profile.duplicate_ratio,
+        current=current_profile.duplicate_ratio,
+        threshold=thresholds["max_duplicate_ratio_delta"],
+        message="duplicate ratio drift exceeded threshold",
+    )
+
+    baseline_columns = set(baseline_profile.columns)
+    current_columns = set(current_profile.columns)
+
+    if not thresholds["allow_missing_columns"]:
+        for column in sorted(baseline_columns - current_columns):
+            issues.append(
+                QualityGateIssue(
+                    metric="missing_column",
+                    column=column,
+                    baseline=column,
+                    current=None,
+                    threshold="allow_missing_columns=True",
+                    message=f"column {column!r} is missing from current profile",
+                )
+            )
+
+    if not thresholds["allow_new_columns"]:
+        for column in sorted(current_columns - baseline_columns):
+            issues.append(
+                QualityGateIssue(
+                    metric="new_column",
+                    column=column,
+                    baseline=None,
+                    current=column,
+                    threshold="allow_new_columns=True",
+                    message=f"column {column!r} was added in current profile",
+                )
+            )
+
+    for column in sorted(baseline_columns & current_columns):
+        baseline_column = baseline_profile.columns[column]
+        current_column = current_profile.columns[column]
+
+        if (
+            thresholds["fail_on_dtype_change"]
+            and baseline_column.dtype != current_column.dtype
+        ):
+            issues.append(
+                QualityGateIssue(
+                    metric="dtype",
+                    column=column,
+                    baseline=baseline_column.dtype,
+                    current=current_column.dtype,
+                    threshold="same dtype",
+                    message=f"column {column!r} dtype changed",
+                )
+            )
+
+        _add_absolute_issue(
+            issues,
+            metric="null_ratio",
+            column=column,
+            baseline=baseline_column.null_ratio,
+            current=current_column.null_ratio,
+            threshold=thresholds["max_null_ratio_delta"],
+            message=f"column {column!r} null ratio drift exceeded threshold",
+        )
+
+        if _is_numeric_dtype(baseline_column.dtype) and _is_numeric_dtype(
+            current_column.dtype
+        ):
+            _add_ratio_issue(
+                issues,
+                metric="numeric_mean",
+                column=column,
+                baseline=baseline_column.mean,
+                current=current_column.mean,
+                threshold=thresholds["max_numeric_mean_delta_ratio"],
+                message=f"column {column!r} numeric mean drift exceeded threshold",
+            )
+            _add_ratio_issue(
+                issues,
+                metric="numeric_std",
+                column=column,
+                baseline=baseline_column.std,
+                current=current_column.std,
+                threshold=thresholds["max_numeric_std_delta_ratio"],
+                message=(
+                    f"column {column!r} numeric standard deviation drift "
+                    "exceeded threshold"
+                ),
+            )
+
+    return QualityGateResult(
+        baseline_profile=baseline_profile,
+        current_profile=current_profile,
+        issues=issues,
+        thresholds=thresholds,
+    )
+
+
 def _calculate_quality_score(
     row_count: int,
     duplicate_ratio: float,
@@ -628,6 +926,108 @@ def _clean_drift_entry(entry: dict[str, Any]) -> dict[str, Any]:
         },
         "reasons": list(entry["reasons"]),
     }
+
+
+def _validate_gate_threshold(value: float | None, name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a non-negative number or None")
+    value = float(value)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return value
+
+
+def _validate_gate_bool(value: bool, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be a bool")
+    return value
+
+
+def _relative_delta(baseline: Any, current: Any) -> float | None:
+    if baseline is None or current is None:
+        return None
+    if not isinstance(baseline, (int, float)) or not isinstance(current, (int, float)):
+        return None
+    baseline_value = float(baseline)
+    current_value = float(current)
+    if not math.isfinite(baseline_value) or not math.isfinite(current_value):
+        return None
+    return abs(current_value - baseline_value) / max(abs(baseline_value), 1.0)
+
+
+def _absolute_delta(baseline: Any, current: Any) -> float | None:
+    if baseline is None or current is None:
+        return None
+    if not isinstance(baseline, (int, float)) or not isinstance(current, (int, float)):
+        return None
+    baseline_value = float(baseline)
+    current_value = float(current)
+    if not math.isfinite(baseline_value) or not math.isfinite(current_value):
+        return None
+    return abs(current_value - baseline_value)
+
+
+def _add_ratio_issue(
+    issues: list[QualityGateIssue],
+    *,
+    metric: str,
+    baseline: Any,
+    current: Any,
+    threshold: float | None,
+    message: str,
+    column: str | None = None,
+) -> None:
+    if threshold is None:
+        return
+    delta = _relative_delta(baseline, current)
+    if delta is not None and delta > threshold:
+        issues.append(
+            QualityGateIssue(
+                metric=metric,
+                column=column,
+                baseline=baseline,
+                current=current,
+                threshold=threshold,
+                delta=round(delta, 6),
+                message=message,
+            )
+        )
+
+
+def _add_absolute_issue(
+    issues: list[QualityGateIssue],
+    *,
+    metric: str,
+    baseline: Any,
+    current: Any,
+    threshold: float | None,
+    message: str,
+    column: str | None = None,
+) -> None:
+    if threshold is None:
+        return
+    delta = _absolute_delta(baseline, current)
+    if delta is not None and delta > threshold:
+        issues.append(
+            QualityGateIssue(
+                metric=metric,
+                column=column,
+                baseline=baseline,
+                current=current,
+                threshold=threshold,
+                delta=round(delta, 6),
+                message=message,
+            )
+        )
+
+
+def _markdown_cell(value: Any) -> str:
+    if value is None:
+        return "-"
+    text = str(_clean_scalar(value))
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", "<br>")
 
 
 def _compare_column_profiles(
