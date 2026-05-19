@@ -226,8 +226,8 @@ std::vector<std::string> CsvReader::parse_line(const std::string& line) const {
             } else if (c == config_.delimiter) {
                 fields.push_back(field);
                 field.clear();
-            } else if (c == '\r') {
-                // skip carriage return
+            } else if (c == '\r' && !in_quotes) {
+                continue;
             } else {
                 field += c;
             }
@@ -398,14 +398,31 @@ Frame CsvReader::read(const std::string& path) const {
         config_.has_header ? std::optional<size_t>{header.size()} : std::nullopt;
     while (read_record(file, line)) {
         ++record_number;
-        if (config_.nrows.has_value() && row_count >= config_.nrows.value()) break;
-        if (line.empty()) continue;
+
+        if (config_.nrows.has_value() && row_count >= config_.nrows.value()) {
+            break;
+        }
+
+        if (line.empty()) {
+            continue;
+        }
+
         auto fields = parse_line(line);
-        if (!expected_cols.has_value()) {
+
+        if (!config_.has_header && !expected_cols.has_value()) {
             expected_cols = fields.size();
-        } else {
+        }
+
+        if (config_.mode == "strict" && expected_cols.has_value()) {
             validate_row_width(record_number, expected_cols.value(), fields.size());
         }
+
+        if (expected_cols.has_value()) {
+            while (fields.size() < expected_cols.value()) {
+                fields.push_back("");
+            }
+        }
+
         raw_data.push_back(std::move(fields));
         ++row_count;
     }

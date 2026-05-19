@@ -151,6 +151,17 @@ def _validate_null_values(null_values: list[str]) -> list[str]:
     return list(null_values)
 
 
+def _validate_parser_mode(mode: str) -> str:
+    """Validate CSV parser mode."""
+    if not isinstance(mode, str):
+        raise TypeError("mode must be a string")
+
+    if mode not in {"strict", "permissive"}:
+        raise ValueError("mode must be either 'strict' or 'permissive'")
+
+    return mode
+
+
 def read_csv(
     path: str | os.PathLike[str],
     *,
@@ -162,6 +173,7 @@ def read_csv(
     trim_headers: bool = True,
     thousands_separator: str | None = None,
     null_values: list[str] | None = None,
+    mode: str = "strict",
 ) -> ArFrame:
     """Read a CSV file into an ArFrame via C++ backend.
 
@@ -189,6 +201,12 @@ def read_csv(
         properly in the CSV input. For example, when using a comma
         delimiter, the value "1,234" must be quoted, while unquoted
         1,234 is interpreted as two separate fields.
+
+    mode : {"strict", "permissive"}, default "strict"
+        Controls malformed row handling.
+
+        - strict: raises CsvReadError on inconsistent row widths.
+        - permissive: fills missing trailing fields with nulls.
 
     Returns
     -------
@@ -229,13 +247,14 @@ def read_csv(
 
     _validate_thousands_separator(thousands_separator)
     delimiter = _validate_delimiter(delimiter)
-
+    mode = _validate_parser_mode(mode)
     config = _CsvConfig()
     config.delimiter = delimiter
     config.has_header = has_header
     config.encoding = encoding
     config.trim_headers = trim_headers
     config.thousands_separator = thousands_separator
+    config.mode = mode
 
     if null_values is not None:
         config.null_values = _validate_null_values(null_values)
